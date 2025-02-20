@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MINIFLOAT</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+        }
+
+        div {
+            margin: 16px;
+            border: 2px solid black;
+            border-radius: 8px;
+            padding: 16px;
+        }
+    </style>
+    <script src="important.js"></script>
+</head>
+
+<body>
+    <div>
+        <h1>RBF Workspace</h1>
+        <p>The RootBeerFloat Workspace is a place to do converting and listening of RBF Bottles (files)</p>
+        <label>Sample Rate: <input type="number" value="44100" id="sampleRate"> khz</label>
+    </div>
+    <div>
+        <h2>Convert actual real audio to RBF</h2>
+        <input type="file" id="audioFile" accept="audio/*">
+        <button onclick="processAudio()">Process Audio</button>
+        <button onclick="dlRbf()">Download after processing</button>
+    </div>
+    <div>
+        <h2>Load and play an RBF file</h2>
+        <input type="file" id="rbfFile" accept="audio/*">
+        <button onclick="processAudio(true)">Process RBF</button>
+    </div>
+    <div>
+        <h2>Progress</h2>
+        <p id="prog">100%</p>
+    </div>
+    <script>
+        const prog = document.querySelector('#prog');
+        prog.update = x => prog.textContent = ((x * 100) ^ 0) + '%';
+
+        const AC = () => new AudioContext({
+            latencyHint: "interactive",
+            sampleRate: document.getElementById('sampleRate').value
+        });
+
+        class RootBeerFloat {
+            static fromSamples() {
+                
+            }
+            constructor(uint8) {
+                this._raw = uint8;
+                this.channels = uint8[0];
+                this.sampleRate = (uint8[1] << 16) + (uint8[2] << 8) + uint8[3];
+                this.samples = uint8.slice(4);
+
+                this._requestPlay = false;
+                this._canPlay = false;
+
+                this._ac = new AudioContext({
+                    latencyHint: "playback",
+                    sampleRate: this.sampleRate
+                });
+
+                let bitRange = 2**16;
+                let minifloatCurrent = 0;
+                let rbf = 0;
+
+                mapper(
+                    (sample, index, arr) => { // Func
+                        let rbf = minifloatToNumber.lookup[sample]
+                        playback[index] = (minifloatCurrent + rbf) / bitRange;
+                        minifloatCurrent += rbf;
+                    },
+                    this.samples
+                ).then(() => {
+                    this._canPlay = true;
+                    if (this._requestPlay)
+                        _startAudioContext();
+                })
+            }
+
+            play() {
+                this._requestPlay = true;
+                if (this._canPlay)
+                    _startAudioContext();
+            }
+
+            _startAudioContext() {
+                console.log('In theory, this would play')
+            }
+        }
+
+        function bufferToRBF(ab) {
+            return {
+                channels: ab[0],
+                samplerate: (ab[1] << 16) + (ab[2] << 8) + ab[3],
+                buffer: ab.slice(4)
+            }
+        }
+
+        let int16Samples = [];
+
+        let playback = [];
+
+        let samples = [];
+
+        const bitRange = 2 ** 16;
+
+        let minifloatCurrent = 0;
+
+        let rbf = [];
+
+        let file, fileInput, currentFile;
+
+        function processAudio(isRBF = false) {
+
+            // Get file input
+            function getFile(input) {
+                fileInput = document.getElementById(input);
+                file = fileInput.files[0];
+                currentFile = file.name;
+                if (!file) {
+                    alert("Please select a file first.");
+                    return false;
+                }
+                return true;
+            }
+
+            const reader = new FileReader();
+            reader.onerror = function (error) {
+                console.error("Error reading " + currentFile + ": ", error);
+                alert("There was an error reading the audio file.");
+            };
+
+            if (isRBF) {
+                if (!getFile("rbfFile")) return;
+
+                reader.onload = function (event) {
+                    let b = new Uint8Array(event.target.result);
+                    mapper(
+                        (sample, index, arr) => { // Func
+                            let rbf = minifloatToNumber.lookup[sample]
+                            playback[index] = (minifloatCurrent + rbf) / bitRange;
+                            minifloatCurrent += rbf;
+                        },
+                        b, // ArrayBuffer
+                        4   // Start index, ignore 2 starting bytes for channels/samplerate
+                    ).then(() => {
+                        let sr = (b[1] << 16) + (b[2] << 8) + b[3]; // 3 Byte sample rate
+                        console.log(sr);
+                        document.getElementById('sampleRate').value = sr;
+                        goPlaybackGo();
+                    })
+                };
+            } else { // Normal Audio File
+                if (!getFile("audioFile")) return;
+
+                reader.onload = function (event) {
+                    const audioContext = AC();
+                    audioContext.decodeAudioData(event.target.result, function (buffer) {
+                        samples = buffer.getChannelData(0); // Get samples from the first channel (mono or left channel in stereo)
+                        
+                        // Accomodate lookahead
+                        samples[samples.length] = samples[samples.length - 1];
+                        samples[samples.length] = samples[samples.length - 1];
+                        
+                        console.log(buffer);
+
+                        rbf[0] = buffer.numberOfChannels;
+                        switch (buffer.sampleRate) {
+                            case 44_100:
+                                rbf[1] = 0;
+                                break;
+                            case 48_000:
+                                rbf[1] = 1;
+                                break;
+                        }
+                        rbf[3] = buffer.sampleRate & 0xff;
+                        rbf[2] = (buffer.sampleRate >> 8) & 0xff;
+                        rbf[1] = (buffer.sampleRate >> 16) & 0xff;
+
+                        int16Samples = [];
+                        mapper((sample, index) => {
+                            const int16Sample = sample * bitRange;
+                            const minifloatDeltaTarget = int16Sample - minifloatCurrent;
+                            // rbf[index + 4] = numberToMinifloat(minifloatDeltaTarget);
+                            rbf[index + 4] = lookaheadGetMinifloat(minifloatCurrent, int16Sample, samples[index + 1])
+                            minifloatCurrent += minifloatToNumber.lookup[rbf[index + 4]];
+                            playback[index] = minifloatCurrent / bitRange;
+                        }, samples).then(() => {
+                            goPlaybackGo();
+                        }).catch((error) => {
+                            console.error("Error occurred during sample processing: ", error);
+                            alert("There was an error processing the audio file.");
+                        });
+                    }, function (error) {
+                        console.error("Error decoding audio data: ", error);
+                        alert("There was an error processing the audio file.");
+                    });
+                };
+            }
+            reader.readAsArrayBuffer(file);
+
+        }
+
+        function goPlaybackGo() {
+            const audioContext = AC();
+
+            // Create a buffer with normalized samples (Float32Array)
+            const audioBuffer = audioContext.createBuffer(1, playback.length - 2, audioContext.sampleRate);
+
+            // Copy normalized data into the AudioBuffer (1 channel)
+            const channelData = audioBuffer.getChannelData(0);
+            channelData.set(playback.slice(4));
+
+            // Create a source node from the buffer
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+
+            // Connect the source node to the audio context's destination (the speakers)
+            source.connect(audioContext.destination);
+
+            // Start playback
+            source.start();
+
+            console.log("Audio playback started");
+        }
+
+        function dlRbf() {
+            let byteArray = new Uint8Array(rbf);
+
+            // Create a Blob from the Uint8Array (with the 'application/octet-stream' MIME type for binary data)
+            let blob = new Blob([byteArray], { type: 'application/octet-stream' });
+
+            // Create an anchor element for downloading the file
+            let link = document.createElement('a');
+
+            // Create a URL for the Blob
+            let url = URL.createObjectURL(blob);
+
+            // Set the href of the link to the Blob URL and specify the file name
+            link.href = url;
+            link.download = removeExtension(currentFile) + '.rbf'; // The name of the file the user will download
+
+            // Programmatically trigger a click on the link to start the download
+            link.click();
+
+            // Clean up by revoking the Blob URL to free memory
+            URL.revokeObjectURL(url);
+        }
+
+        function removeExtension(fileName) {
+            // Find the last occurrence of '.'
+            const dotIndex = fileName.lastIndexOf('.');
+
+            // If there is no dot (i.e., no extension), return the original name
+            if (dotIndex === -1) {
+                return fileName;
+            }
+
+            // Otherwise, return the portion of the string before the dot
+            return fileName.substring(0, dotIndex);
+        }
+
+    </script>
+</body>
+
+</html>
